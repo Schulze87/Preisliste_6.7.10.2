@@ -2,10 +2,11 @@
 
 namespace Preisliste\Service;
 
+use Psr\Container\ContainerInterface;
+use Psr\Log\LoggerInterface;
 use Shopware\Core\Content\Product\SalesChannel\SalesChannelProductEntity;
 use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
-use Shopware\Core\Framework\DataAbstractionLayer\Pricing\CalculatedPriceCollection;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsAnyFilter;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
@@ -24,6 +25,9 @@ class PriceListCsvService
         private readonly SalesChannelRepository $salesChannelProductRepository,
         private readonly EntityRepository $categoryRepository,
         private readonly SystemConfigService $systemConfigService,
+        private readonly ?LoggerInterface $logger = null,
+        private readonly ?ContainerInterface $container = null,
+        private readonly ?EntityRepository $productPriceRepository = null
     ) {
     }
 
@@ -129,7 +133,7 @@ class PriceListCsvService
                 // Preis NUR aus Advanced Prices
                 $basePrice = $this->resolvePriceFromAllAdvancedPrices($product, $context);
 
-                // Kein Match → kein Preis
+                // Kein Match → kein Preis (kein Fallback!)
                 if ($basePrice === null) {
                     fputcsv($handle, [$productNumber, $productName, '', '', ''], ';');
                     continue;
@@ -155,29 +159,210 @@ class PriceListCsvService
         } while ($products->count() > 0);
     }
 
+    /**
+     * Hauptmethode: Preise aus erweiterten Preisen (Rule-basiert) ermitteln
+     * KEIN Fallback auf Standardpreise!
+     */
     private function resolvePriceFromAllAdvancedPrices(
         SalesChannelProductEntity $product,
         SalesChannelContext $context
     ): ?float {
-
-        $advanced = $product->getPrices()?->getElements() ?? [];
-        if ($advanced === []) return null;
+        // Erweiterte Preise laden (Fix für 6.7.10.2)
+        $advancedPrices = $this->loadAdvancedPrices($product->getId(), $context);
+        
+        if ($advancedPrices === []) {
+            $this->logger?->debug('No advanced prices found for product', [
+                'productId' => $product->getId(),
+                'productNumber' => $product->getProductNumber()
+            ]);
+            return null;
+        }
 
         $activeRules = $context->getRuleIds();
         $configuredRules = $this->systemConfigService->get('Preisliste.config.priceGroupRuleIds') ?? [];
+        
+        if (!is_array($configuredRules) || $configuredRules === []) {
+            $this->logger?->debug('No configured rules found');
+            return null;
+        }
 
         $matchingRules = array_values(array_intersect($activeRules, $configuredRules));
-        if ($matchingRules === []) return null;
+        if ($matchingRules === []) {
+            $this->logger?->debug('No matching rules', [
+                'activeRules' => $activeRules,
+                'configuredRules' => $configuredRules
+            ]);
+            return null;
+        }
 
         $ruleId = $matchingRules[0];
 
-        foreach ($advanced as $price) {
-            if ($price->getRuleId() === $ruleId) {
-                $currencyPrice = $price->getPrice()?->getCurrencyPrice($context->getCurrencyId());
-                return $currencyPrice?->getNet() ?? null;
+        foreach ($advancedPrices as $price) {
+            $priceRuleId = $this->getPriceRuleId($price);
+            
+            if ($priceRuleId === $ruleId) {
+                $netPrice = $this->extractNetPriceFromPrice($price, $context);
+                if ($netPrice !== null && is_numeric($netPrice) && $netPrice > 0) {
+                    $this->logger?->debug('Found matching price', [
+                        'productId' => $product->getId(),
+                        'ruleId' => $ruleId,
+                        'netPrice' => $netPrice
+                    ]);
+                    return (float) $netPrice;
+                }
             }
         }
 
+        return null;
+    }
+
+    /**
+     * Lädt erweiterte Preise für ein Produkt (kompatibel mit 6.7.10.2)
+     */
+    private function loadAdvancedPrices(string $productId, SalesChannelContext $context): array
+    {
+        // Versuche über Repository (wenn injiziert)
+        if ($this->productPriceRepository !== null) {
+            try {
+                $criteria = new Criteria();
+                $criteria->addFilter(new EqualsFilter('productId', $productId));
+                $criteria->addAssociation('rule');
+                
+                $prices = $this->productPriceRepository->search($criteria, $context->getContext())->getEntities();
+                
+                if ($prices->count() > 0) {
+                    return iterator_to_array($prices);
+                }
+            } catch (\Throwable $e) {
+                $this->logger?->warning('Repository price loading failed, trying DBAL fallback', [
+                    'productId' => $productId,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+
+        // Fallback: Direkte DB-Abfrage über DBAL
+        return $this->loadPricesViaDBAL($productId, $context);
+    }
+
+    /**
+     * DBAL-Fallback für erweiterte Preise
+     */
+    private function loadPricesViaDBAL(string $productId, SalesChannelContext $context): array
+    {
+        if ($this->container === null) {
+            return [];
+        }
+
+        try {
+            /** @var \Doctrine\DBAL\Connection $connection */
+            $connection = $this->container->get(\Doctrine\DBAL\Connection::class);
+            
+            // Konvertiere UUID von hex zu binary
+            $productIdBin = hex2bin(str_replace('-', '', $productId));
+            
+            $sql = "
+                SELECT 
+                    pp.id,
+                    pp.product_id,
+                    pp.rule_id,
+                    pp.quantity_start,
+                    pp.quantity_end,
+                    pp.price as price_json
+                FROM product_price pp
+                WHERE pp.product_id = :productId
+            ";
+            
+            $results = $connection->fetchAllAssociative($sql, ['productId' => $productIdBin]);
+            
+            $prices = [];
+            foreach ($results as $row) {
+                $priceData = json_decode($row['price_json'], true);
+                $prices[] = [
+                    'id' => bin2hex($row['id']),
+                    'ruleId' => $row['rule_id'] ? bin2hex($row['rule_id']) : null,
+                    'quantityStart' => $row['quantity_start'],
+                    'quantityEnd' => $row['quantity_end'],
+                    'price' => $priceData
+                ];
+            }
+            
+            $this->logger?->debug('Loaded prices via DBAL', [
+                'productId' => $productId,
+                'count' => count($prices)
+            ]);
+            
+            return $prices;
+        } catch (\Throwable $e) {
+            $this->logger?->error('DBAL price loading failed', [
+                'productId' => $productId,
+                'error' => $e->getMessage()
+            ]);
+            return [];
+        }
+    }
+
+    /**
+     * Extrahiert die Rule-ID aus einem Price-Objekt oder Array
+     */
+    private function getPriceRuleId($price): ?string
+    {
+        // Objekt mit getRuleId() Methode
+        if (is_object($price) && method_exists($price, 'getRuleId')) {
+            $ruleId = $price->getRuleId();
+            return $ruleId ?: null;
+        }
+        
+        // Objekt mit getRule() Methode
+        if (is_object($price) && method_exists($price, 'getRule')) {
+            $rule = $price->getRule();
+            if ($rule && method_exists($rule, 'getId')) {
+                return $rule->getId();
+            }
+        }
+        
+        // Array-Zugriff
+        if (is_array($price) && isset($price['ruleId'])) {
+            return $price['ruleId'];
+        }
+        
+        return null;
+    }
+
+    /**
+     * Extrahiert den Netto-Preis aus einem Price-Objekt oder Array
+     */
+    private function extractNetPriceFromPrice($price, SalesChannelContext $context): ?float
+    {
+        $currencyId = $context->getCurrency()->getId();
+        
+        // Objekt mit getPrice() Methode (Standard Shopware)
+        if (is_object($price) && method_exists($price, 'getPrice')) {
+            $priceStruct = $price->getPrice();
+            if ($priceStruct && method_exists($priceStruct, 'getCurrencyPrice')) {
+                $currencyPrice = $priceStruct->getCurrencyPrice($currencyId);
+                if ($currencyPrice && method_exists($currencyPrice, 'getNet')) {
+                    $net = $currencyPrice->getNet();
+                    return $net !== null ? (float) $net : null;
+                }
+            }
+        }
+        
+        // Array-Zugriff für DBAL-Fallback
+        if (is_array($price) && isset($price['price'])) {
+            foreach ($price['price'] as $currencyPrice) {
+                if (isset($currencyPrice['currencyId']) && $currencyPrice['currencyId'] === $currencyId) {
+                    if (isset($currencyPrice['net'])) {
+                        return (float) $currencyPrice['net'];
+                    }
+                    if (isset($currencyPrice['gross'])) {
+                        // Falls nur brutto vorhanden, netto schätzen (20% MwSt.)
+                        return (float) $currencyPrice['gross'] / 1.19;
+                    }
+                }
+            }
+        }
+        
         return null;
     }
 
