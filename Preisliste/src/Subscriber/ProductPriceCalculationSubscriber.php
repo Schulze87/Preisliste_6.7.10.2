@@ -9,13 +9,17 @@ use Shopware\Core\Framework\DataAbstractionLayer\Pricing\CalculatedPrice;
 use Shopware\Core\Framework\DataAbstractionLayer\Pricing\CalculatedPriceCollection;
 use Shopware\Core\System\SalesChannel\SalesChannelContext;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Shopware\Core\Content\Product\Events\ProductPriceCalculatedEvent;
 use Shopware\Core\Content\Product\Events\SalesChannelProductLoadedEvent;
+use Shopware\Core\Content\Product\SalesChannel\Price\AbstractProductPriceCalculator;
 
 class ProductPriceCalculationSubscriber implements EventSubscriberInterface
 {
+    // Für Shopware 6.7.10.2 aktualisierte Service-IDs
     private array $candidateCalculatorIds = [
-        'shopware.product_price_calculator',
+        'Shopware\Core\Content\Product\SalesChannel\Price\AbstractProductPriceCalculator',
         'Shopware\Core\Content\Product\SalesChannel\Price\ProductPriceCalculator',
+        'shopware.product_price_calculator',
         'Shopware\Core\Content\Product\SalesChannel\Price\AppScriptProductPriceCalculator',
     ];
 
@@ -27,15 +31,25 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
     public static function getSubscribedEvents(): array
     {
         return [
-            SalesChannelProductLoadedEvent::class => 'onSalesChannelProductsLoaded',
+            ProductPriceCalculatedEvent::class => ['onProductPriceCalculated', -10],
+            SalesChannelProductLoadedEvent::class => ['onSalesChannelProductsLoaded', 5],
         ];
+    }
+
+    public function onProductPriceCalculated(ProductPriceCalculatedEvent $event): void
+    {
+        $context = $event->getSalesChannelContext();
+        
+        foreach ($event->getProducts() as $product) {
+            $this->ensureValidPrices($product, $context);
+        }
     }
 
     public function onSalesChannelProductsLoaded(SalesChannelProductLoadedEvent $event): void
     {
         $calculator = $this->resolveCalculator();
         if ($calculator === null) {
-            // Kein Calculator vorhanden — nichts zu tun
+            $this->logger?->warning('ProductPriceCalculationSubscriber: No calculator found');
             return;
         }
 
@@ -46,39 +60,82 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
                 continue;
             }
 
-            // Wenn bereits calculatedPrices oder calculatedPrice gesetzt sind, nicht überschreiben
-            $hasCalculated = ($entity->getCalculatedPrices() instanceof CalculatedPriceCollection && $entity->getCalculatedPrices()->count() > 0)
-                || ($entity->getCalculatedPrice() instanceof CalculatedPrice);
+            $this->ensureValidPrices($entity, $context, $calculator);
+        }
+    }
 
-            if ($hasCalculated) {
-                continue;
-            }
+    private function ensureValidPrices(
+        SalesChannelProductEntity $product, 
+        SalesChannelContext $context, 
+        ?object $calculator = null
+    ): void {
+        // Bereits vorhandene Preise sind in Ordnung
+        $hasCalculated = ($product->getCalculatedPrices() instanceof CalculatedPriceCollection && $product->getCalculatedPrices()->count() > 0)
+            || ($product->getCalculatedPrice() instanceof CalculatedPrice);
 
-            try {
-                $calculated = $this->invokeCalculatorSafely($calculator, $entity, $context);
+        if ($hasCalculated) {
+            return;
+        }
 
-                if ($calculated instanceof CalculatedPriceCollection) {
-                    $entity->setCalculatedPrices($calculated);
-                } elseif ($calculated instanceof CalculatedPrice) {
-                    $entity->setCalculatedPrice($calculated);
-                } elseif (is_array($calculated)) {
-                    // flexible handling: array with 'unitPrice' or 'calculatedPrices'
-                    if (isset($calculated['calculatedPrices']) && $calculated['calculatedPrices'] instanceof CalculatedPriceCollection) {
-                        $entity->setCalculatedPrices($calculated['calculatedPrices']);
-                    } elseif (isset($calculated['unitPrice']) && is_numeric($calculated['unitPrice'])) {
-                        $unit = (float) $calculated['unitPrice'];
-                        $cp = new CalculatedPrice((string) $unit, $unit, [], $entity->getId());
-                        $entity->setCalculatedPrice($cp);
-                    }
+        // Versuche Preise über den Calculator zu bekommen
+        if ($calculator !== null) {
+            $this->calculatePricesWithCalculator($calculator, $product, $context);
+            return;
+        }
+
+        $calc = $this->resolveCalculator();
+        if ($calc !== null) {
+            $this->calculatePricesWithCalculator($calc, $product, $context);
+            return;
+        }
+
+        // KEIN Fallback! Wenn kein Calculator verfügbar ist, loggen und nichts setzen
+        $this->logger?->error('ProductPriceCalculationSubscriber: No calculator available - prices will be missing', [
+            'productId' => $product->getId(),
+            'productNumber' => $product->getProductNumber(),
+        ]);
+    }
+
+    private function calculatePricesWithCalculator(
+        object $calculator, 
+        SalesChannelProductEntity $product, 
+        SalesChannelContext $context
+    ): void {
+        try {
+            if ($calculator instanceof AbstractProductPriceCalculator) {
+                $result = $calculator->calculate($product, $context);
+                if ($result instanceof CalculatedPrice) {
+                    $product->setCalculatedPrice($result);
+                } elseif ($result instanceof CalculatedPriceCollection) {
+                    $product->setCalculatedPrices($result);
+                } else {
+                    $this->logger?->warning('ProductPriceCalculationSubscriber: Calculator returned unexpected type', [
+                        'productId' => $product->getId(),
+                        'resultType' => get_debug_type($result),
+                    ]);
                 }
-            } catch (\Throwable $e) {
-                $this->logger?->warning('ProductPriceCalculationSubscriber: calculator failed for product', [
-                    'productId' => $entity->getId(),
-                    'exception' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(),
-                ]);
-                // Fehler defensiv: nicht weiterwerfen, damit Export/Seite nicht abstürzt
+                return;
             }
+
+            $result = $this->invokeCalculatorSafely($calculator, $product, $context);
+            
+            if ($result instanceof CalculatedPriceCollection) {
+                $product->setCalculatedPrices($result);
+            } elseif ($result instanceof CalculatedPrice) {
+                $product->setCalculatedPrice($result);
+            } elseif ($result !== null) {
+                $this->logger?->warning('ProductPriceCalculationSubscriber: Unknown result type', [
+                    'productId' => $product->getId(),
+                    'resultType' => get_debug_type($result),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            // KEIN Fallback - nur loggen, Preis bleibt leer
+            $this->logger?->error('ProductPriceCalculationSubscriber: calculator failed - price will be missing', [
+                'productId' => $product->getId(),
+                'productNumber' => $product->getProductNumber(),
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 
@@ -89,11 +146,15 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
                 if ($this->container->has($id)) {
                     $service = $this->container->get($id);
                     if (is_object($service)) {
+                        $this->logger?->debug('ProductPriceCalculationSubscriber: Found calculator', [
+                            'serviceId' => $id,
+                            'class' => get_class($service)
+                        ]);
                         return $service;
                     }
                 }
             } catch (\Throwable $e) {
-                $this->logger?->warning('ProductPriceCalculationSubscriber: error resolving calculator service', [
+                $this->logger?->warning('ProductPriceCalculationSubscriber: error resolving calculator', [
                     'serviceId' => $id,
                     'exception' => $e->getMessage(),
                 ]);
@@ -103,52 +164,18 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
         return null;
     }
 
-    /**
-     * Versucht verschiedene Aufrufvarianten des Calculators, ohne Exceptions nach außen zu werfen.
-     *
-     * @return CalculatedPrice|CalculatedPriceCollection|array|null
-     */
     private function invokeCalculatorSafely(object $calculator, SalesChannelProductEntity $product, SalesChannelContext $context)
     {
-        try {
-            // 1) Standard: calculate($product, $context)
-            if (is_callable([$calculator, 'calculate'])) {
-                $result = $calculator->calculate($product, $context);
-                if ($result !== null) {
-                    return $result;
-                }
-            }
+        if (is_callable([$calculator, 'calculate'])) {
+            return $calculator->calculate($product, $context);
+        }
 
-            // 2) Manche Implementierungen: calculatePrice($product, $context)
-            if (is_callable([$calculator, 'calculatePrice'])) {
-                $result = $calculator->calculatePrice($product, $context);
-                if ($result !== null) {
-                    return $result;
-                }
-            }
+        if (is_callable([$calculator, 'calculatePrice'])) {
+            return $calculator->calculatePrice($product, $context);
+        }
 
-            // 3) Manche AppScript-Implementierungen liefern calculatePrices or similar
-            if (is_callable([$calculator, 'calculatePrices'])) {
-                $result = $calculator->calculatePrices($product, $context);
-                if ($result !== null) {
-                    return $result;
-                }
-            }
-
-            // 4) Fallback: manche liefern ein Array via __invoke oder andere Methode
-            if (is_callable($calculator)) {
-                $result = $calculator($product, $context);
-                if ($result !== null) {
-                    return $result;
-                }
-            }
-        } catch (\Throwable $e) {
-            // Log und return null
-            $this->logger?->warning('ProductPriceCalculationSubscriber: calculator invocation threw', [
-                'productId' => $product->getId(),
-                'exception' => $e->getMessage(),
-            ]);
-            return null;
+        if (is_callable([$calculator, 'calculateProductPrice'])) {
+            return $calculator->calculateProductPrice($product, $context);
         }
 
         return null;
