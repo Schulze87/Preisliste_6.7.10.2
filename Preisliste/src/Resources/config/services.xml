@@ -31,11 +31,11 @@
             </call>
         </service>
 
-        <!-- SUBSCRIBER -->
+        <!-- SUBSCRIBER - Priorität erhöht und Events angepasst -->
         <service id="Preisliste\Subscriber\ProductPriceCalculationSubscriber">
             <argument type="service" id="service_container"/>
             <argument type="service" id="logger" on-invalid="null"/>
-            <tag name="kernel.event_subscriber"/>
+            <tag name="kernel.event_subscriber" priority="10"/>
         </service>
     </services>
 </container>
