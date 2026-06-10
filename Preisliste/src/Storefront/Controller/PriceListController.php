@@ -90,70 +90,76 @@ class PriceListController extends StorefrontController
         )));
 
         if ($selectedCategoryIds === []) {
+            $this->logger->warning('No categories selected for download', [
+                'customerId' => $salesChannelContext->getCustomer()?->getId(),
+            ]);
             throw new NotFoundHttpException();
         }
 
         $this->logger->info('Preisliste download requested', [
-            'salesChannelId' => $salesChannelContext->getSalesChannel()->getId(),
+            'salesChannelId' => $salesChannelContext->getSalesChannel()?->getId(),
             'customerId' => $salesChannelContext->getCustomer()?->getId(),
             'customerGroupId' => $salesChannelContext->getCustomer()?->getGroupId(),
             'selectedCategoryCount' => count($selectedCategoryIds),
+            'selectedCategoryIds' => $selectedCategoryIds,
         ]);
 
         $fileName = 'preisliste-' . date('Y-m-d-H-i-s') . '.csv';
 
-        // Variante A: In-Memory (einfach, für kleine bis mittlere Exporte)
+        // Versuche zuerst über Streaming (speicherschonend)
         try {
-            $csv = $this->priceListCsvService->buildCsv($salesChannelContext, $selectedCategoryIds);
-
-            if ($csv !== '') {
-                $headers = [
-                    'Content-Type' => 'text/csv; charset=UTF-8',
-                    'Content-Disposition' => 'attachment; filename="' . $fileName . '"',
-                    'X-Robots-Tag' => 'noindex, nofollow, noarchive, nosnippet',
-                    'Content-Length' => (string) strlen($csv),
-                ];
-
-                return new Response($csv, 200, $headers);
-            }
-
-            // Falls CSV leer ist, liefern wir trotzdem eine leere Datei mit BOM
-            $emptyCsv = "\xEF\xBB\xBF";
-            $headers = [
-                'Content-Type' => 'text/csv; charset=UTF-8',
-                'Content-Disposition' => 'attachment; filename="' . $fileName . '"',
-                'X-Robots-Tag' => 'noindex, nofollow, noarchive, nosnippet',
-                'Content-Length' => (string) strlen($emptyCsv),
-            ];
-
-            return new Response($emptyCsv, 200, $headers);
+            $response = new Response();
+            $response->headers->set('Content-Type', 'text/csv; charset=utf-8');
+            $response->headers->set('Content-Disposition', 'attachment; filename="' . $fileName . '"');
+            $response->headers->set('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+            
+            // Stream-Content setzen
+            $stream = fopen('php://temp', 'w+');
+            $this->priceListCsvService->streamCsv($salesChannelContext, $selectedCategoryIds, $stream);
+            rewind($stream);
+            $response->setContent(stream_get_contents($stream));
+            fclose($stream);
+            
+            return $response;
         } catch (\Throwable $e) {
-            // Wenn In-Memory fehlschlägt (z. B. OOM), versuchen wir Temp-File Variante
-            $this->logger->warning('In-memory CSV build failed, falling back to temp file', [
+            $this->logger->error('Streaming CSV generation failed', [
                 'exception' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);
+            
+            // Fallback: Temp-Datei
+            return $this->generateViaTempFile($salesChannelContext, $selectedCategoryIds, $fileName);
         }
-
-        // Variante B: Temp-Datei + BinaryFileResponse (skalierbar, empfohlen für große Exporte)
+    }
+    
+    /**
+     * Fallback-Methode für große Exporte via Temp-Datei
+     */
+    private function generateViaTempFile(
+        SalesChannelContext $salesChannelContext, 
+        array $selectedCategoryIds, 
+        string $fileName
+    ): Response {
         $tmpPath = tempnam(sys_get_temp_dir(), 'preisliste_');
+        
         if ($tmpPath === false) {
             $this->logger->error('Could not create temporary file for preisliste export');
             return new Response('Fehler beim Erzeugen der Preisliste', 500);
         }
 
         try {
-            $csv = $this->priceListCsvService->buildCsv($salesChannelContext, $selectedCategoryIds);
-            if ($csv === '') {
-                // Schreibe zumindest BOM, damit Excel die Datei korrekt erkennt
-                file_put_contents($tmpPath, "\xEF\xBB\xBF");
-            } else {
-                file_put_contents($tmpPath, $csv);
+            $handle = fopen($tmpPath, 'w');
+            if ($handle === false) {
+                throw new \RuntimeException('Could not open temp file for writing');
             }
+            
+            $this->priceListCsvService->streamCsv($salesChannelContext, $selectedCategoryIds, $handle);
+            fclose($handle);
 
             $response = new BinaryFileResponse($tmpPath);
             $response->setContentDisposition(ResponseHeaderBag::DISPOSITION_ATTACHMENT, $fileName);
             $response->headers->set('Content-Type', 'text/csv; charset=UTF-8');
+            $response->headers->set('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
             $response->deleteFileAfterSend(true);
 
             $this->logger->info('Preisliste download prepared (temp file)', [
@@ -163,18 +169,27 @@ class PriceListController extends StorefrontController
 
             return $response;
         } catch (\Throwable $e) {
-            @unlink($tmpPath);
+            if (file_exists($tmpPath)) {
+                @unlink($tmpPath);
+            }
+            
             $this->logger->error('Preisliste download failed (temp file)', [
                 'exception' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);
-            return new Response('Fehler beim Erzeugen der Preisliste', 500);
+            
+            return new Response('Fehler beim Erzeugen der Preisliste: ' . $e->getMessage(), 500);
         }
     }
 
     private function denyUnlessAllowed(SalesChannelContext $salesChannelContext): void
     {
         if (!$this->priceListAccessService->isAllowed($salesChannelContext)) {
+            $this->logger->warning('Access denied for price list', [
+                'customerId' => $salesChannelContext->getCustomer()?->getId(),
+                'customerGroupId' => $salesChannelContext->getCustomer()?->getGroupId(),
+                'salesChannelId' => $salesChannelContext->getSalesChannel()?->getId(),
+            ]);
             throw new NotFoundHttpException();
         }
     }
@@ -207,6 +222,9 @@ class PriceListController extends StorefrontController
         $categoryIds = $this->getConfiguredCategoryIds($salesChannelContext);
 
         if ($categoryIds === []) {
+            $this->logger->debug('No configured categories for price list', [
+                'salesChannelId' => $salesChannelContext->getSalesChannelId(),
+            ]);
             return [];
         }
 
@@ -216,6 +234,7 @@ class PriceListController extends StorefrontController
 
         foreach ($categoryIds as $categoryId) {
             if (!isset($categoryMap[$categoryId])) {
+                $this->logger->debug('Category not found', ['categoryId' => $categoryId]);
                 continue;
             }
 
@@ -252,6 +271,8 @@ class PriceListController extends StorefrontController
             }
 
             $criteria = new Criteria($idsToLoad);
+            $criteria->addAssociation('translations');
+            
             /** @var EntitySearchResult $searchResult */
             $searchResult = $this->categoryRepository->search($criteria, $salesChannelContext->getContext());
 
