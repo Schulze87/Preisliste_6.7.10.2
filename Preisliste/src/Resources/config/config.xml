@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/System/SystemConfig/Schema/config.xsd">
+
+    <card>
+        <title>Preisliste Einstellungen</title>
+        <title lang="en-GB">Price list settings</title>
+
+        <!-- Erlaubte Kundengruppen -->
+        <component name="sw-entity-multi-id-select">
+            <name>allowedCustomerGroupIds</name>
+            <entity>customer_group</entity>
+            <label>Erlaubte Kundengruppen</label>
+            <label lang="en-GB">Allowed customer groups</label>
+        </component>
+
+        <!-- Kategorien für CSV-Auswahl -->
+        <component name="sw-entity-multi-id-select">
+            <name>availableCategoryIds</name>
+            <entity>category</entity>
+            <label>Im Frontend auswählbare Kategorien</label>
+            <label lang="en-GB">Categories selectable in storefront</label>
+        </component>
+
+        <!-- NEU: Preisgruppen-Regeln -->
+        <component name="sw-entity-multi-id-select">
+            <name>priceGroupRuleIds</name>
+            <entity>rule</entity>
+            <label>Preisgruppen-Regeln</label>
+            <label lang="en-GB">Price group rules</label>
+        </component>
+
+    </card>
+</config>

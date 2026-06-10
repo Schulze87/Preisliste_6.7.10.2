@@ -1,0 +1,25 @@
+{% sw_extends '@Storefront/storefront/page/account/sidebar.html.twig' %}
+
+{% set allowedCustomerGroupIds = config('Preisliste.config.allowedCustomerGroupIds') %}
+{% set customer = context.customer %}
+{% set customerCustomFields = customer and customer.customFields is defined and customer.customFields ? customer.customFields : {} %}
+{% set isPriceListBlocked = customerCustomFields.custom_payment_preisliste|default(false) %}
+{% set isPriceListAllowed = customer
+    and customer.groupId is defined
+    and allowedCustomerGroupIds is iterable
+    and customer.groupId in allowedCustomerGroupIds
+    and not isPriceListBlocked
+%}
+
+{% block page_account_sidebar_menu_inner %}
+    {{ parent() }}
+
+    {% if isPriceListAllowed %}
+        <a href="{{ path('frontend.account.preisliste.page') }}"
+           title="Preisliste"
+           class="list-group-item list-group-item-action account-aside-item{% if activeRoute is same as('frontend.account.preisliste.page') %} is-active{% endif %}"
+           {% if activeRoute is same as('frontend.account.preisliste.page') %} aria-current="page"{% endif %}>
+            Preisliste
+        </a>
+    {% endif %}
+{% endblock %}

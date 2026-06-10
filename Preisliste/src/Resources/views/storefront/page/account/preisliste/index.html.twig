@@ -1,0 +1,46 @@
+{% sw_extends '@Storefront/storefront/page/account/_page.html.twig' %}
+
+{% block page_account_main_content %}
+    <div class="account-preisliste">
+        <h1>{{ 'preisliste.headline'|trans|sw_sanitize }}</h1>
+        <p>{{ 'preisliste.description'|trans|sw_sanitize }}</p>
+
+        {% if availableCategories is not empty %}
+            <form method="get" action="{{ path('frontend.account.preisliste.download') }}">
+                <div class="card">
+                    <div class="card-body">
+                        {% for category in availableCategories %}
+                            {% set labelParts = category.label|split(' - ') %}
+                            {% set firstLabelPart = labelParts|first %}
+                            {% set remainingLabelParts = labelParts|slice(1) %}
+
+                            <div class="form-check mb-2">
+                                <input
+                                    class="form-check-input"
+                                    type="checkbox"
+                                    name="categories[]"
+                                    value="{{ category.id }}"
+                                    id="preisliste-category-{{ loop.index }}"
+                                    {% if category.id in selectedCategoryIds %}checked{% endif %}
+                                >
+                                <label class="form-check-label" for="preisliste-category-{{ loop.index }}">
+                                    <strong>{{ firstLabelPart }}</strong>{% if remainingLabelParts is not empty %} - {{ remainingLabelParts|join(' - ') }}{% endif %}
+                                </label>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <button type="submit" class="btn btn-primary">
+                        {{ 'preisliste.download'|trans|sw_sanitize }}
+                    </button>
+                </div>
+            </form>
+        {% else %}
+            <div class="alert alert-info">
+                {{ 'preisliste.noCategoriesConfigured'|trans|sw_sanitize }}
+            </div>
+        {% endif %}
+    </div>
+{% endblock %}

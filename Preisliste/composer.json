@@ -1,0 +1,40 @@
+{
+    "name": "lukas/preisliste",
+    "description": "CSV price list export plugin for Shopware 6 storefront customers with login-protected download of product number, product name and customer-specific calculated sales channel prices.",
+    "type": "shopware-platform-plugin",
+    "license": "proprietary",
+    "version": "1.0.0",
+    "authors": [
+        {
+            "name": "Lukas Schulze König"
+        }
+    ],
+    "require": {
+        "shopware/core": "~6.7.0",
+        "shopware/storefront": "~6.7.0"
+    },
+    "extra": {
+        "shopware-plugin-class": "Preisliste\\Preisliste",
+        "label": {
+            "de-DE": "Preisliste",
+            "en-GB": "Price List"
+        },
+        "description": {
+            "de-DE": "Erstellt für eingeloggte Shopware-6-Kunden eine CSV-Preisliste mit Artikelnummer, Produktname und dem im aktuellen Sales-Channel gültigen Kundenpreis.",
+            "en-GB": "Creates a CSV price list for logged-in Shopware 6 customers with product number, product name and the customer-specific price valid in the current sales channel."
+        },
+        "manufacturerLink": {
+            "de-DE": "https://github.com/DEIN-GITHUB-NAME/Preisliste",
+            "en-GB": "https://github.com/DEIN-GITHUB-NAME/Preisliste"
+        },
+        "supportLink": {
+            "de-DE": "https://github.com/DEIN-GITHUB-NAME/Preisliste/issues",
+            "en-GB": "https://github.com/DEIN-GITHUB-NAME/Preisliste/issues"
+        }
+    },
+    "autoload": {
+        "psr-4": {
+            "Preisliste\\": "src/"
+        }
+    }
+}

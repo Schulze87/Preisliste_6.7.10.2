@@ -1,0 +1,44 @@
+name: Build Plugin
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare clean plugin folder
+        run: |
+          rm -rf ./build
+          mkdir -p ./build
+          cp -R ./Preisliste ./build/Preisliste
+
+          echo "=== Build-Ordner ==="
+          find ./build/Preisliste -maxdepth 4 -type f | sort
+
+      - name: Install shopware-cli
+        uses: shopware/shopware-cli-action@v1
+        with:
+          version: 0.12.0
+
+      - name: Build Extension
+        run: |
+          shopware-cli extension zip ./build/Preisliste --disable-git --verbose
+
+      - name: Validate ZIP
+        run: |
+          ls -la *.zip
+          shopware-cli extension validate *.zip
+
+      - name: Upload ZIP as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Preisliste
+          path: "*.zip"
+          if-no-files-found: error

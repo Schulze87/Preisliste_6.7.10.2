@@ -1,0 +1,8 @@
+{
+  "preisliste": {
+    "headline": "Lista de precios",
+    "description": "Seleccione una o más categorías para la exportación CSV.",
+    "download": "Descargar CSV",
+    "noCategoriesConfigured": "Actualmente no hay categorías configuradas para la lista de precios."
+  }
+}
