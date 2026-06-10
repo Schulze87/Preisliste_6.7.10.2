@@ -15,7 +15,6 @@ use Shopware\Core\Content\Product\SalesChannel\Price\AbstractProductPriceCalcula
 
 class ProductPriceCalculationSubscriber implements EventSubscriberInterface
 {
-    // Für Shopware 6.7.10.2 aktualisierte Service-IDs
     private array $candidateCalculatorIds = [
         'Shopware\Core\Content\Product\SalesChannel\Price\AbstractProductPriceCalculator',
         'Shopware\Core\Content\Product\SalesChannel\Price\ProductPriceCalculator',
@@ -69,7 +68,6 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
         SalesChannelContext $context, 
         ?object $calculator = null
     ): void {
-        // Bereits vorhandene Preise sind in Ordnung
         $hasCalculated = ($product->getCalculatedPrices() instanceof CalculatedPriceCollection && $product->getCalculatedPrices()->count() > 0)
             || ($product->getCalculatedPrice() instanceof CalculatedPrice);
 
@@ -77,7 +75,6 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
             return;
         }
 
-        // Versuche Preise über den Calculator zu bekommen
         if ($calculator !== null) {
             $this->calculatePricesWithCalculator($calculator, $product, $context);
             return;
@@ -89,7 +86,7 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
             return;
         }
 
-        // KEIN Fallback! Wenn kein Calculator verfügbar ist, loggen und nichts setzen
+        // KEIN Fallback auf falsche Preise!
         $this->logger?->error('ProductPriceCalculationSubscriber: No calculator available - prices will be missing', [
             'productId' => $product->getId(),
             'productNumber' => $product->getProductNumber(),
@@ -108,11 +105,6 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
                     $product->setCalculatedPrice($result);
                 } elseif ($result instanceof CalculatedPriceCollection) {
                     $product->setCalculatedPrices($result);
-                } else {
-                    $this->logger?->warning('ProductPriceCalculationSubscriber: Calculator returned unexpected type', [
-                        'productId' => $product->getId(),
-                        'resultType' => get_debug_type($result),
-                    ]);
                 }
                 return;
             }
@@ -123,15 +115,10 @@ class ProductPriceCalculationSubscriber implements EventSubscriberInterface
                 $product->setCalculatedPrices($result);
             } elseif ($result instanceof CalculatedPrice) {
                 $product->setCalculatedPrice($result);
-            } elseif ($result !== null) {
-                $this->logger?->warning('ProductPriceCalculationSubscriber: Unknown result type', [
-                    'productId' => $product->getId(),
-                    'resultType' => get_debug_type($result),
-                ]);
             }
         } catch (\Throwable $e) {
-            // KEIN Fallback - nur loggen, Preis bleibt leer
-            $this->logger?->error('ProductPriceCalculationSubscriber: calculator failed - price will be missing', [
+            // KEIN Fallback - nur loggen
+            $this->logger?->error('ProductPriceCalculationSubscriber: calculator failed', [
                 'productId' => $product->getId(),
                 'productNumber' => $product->getProductNumber(),
                 'error' => $e->getMessage(),
